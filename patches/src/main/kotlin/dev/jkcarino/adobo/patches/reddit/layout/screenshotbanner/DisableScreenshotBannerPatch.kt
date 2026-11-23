@@ -1,0 +1,45 @@
+package dev.jkcarino.adobo.patches.reddit.layout.screenshotbanner
+
+import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
+import app.morphe.patcher.patch.packageMetadata
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.util.returnEarly
+import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import dev.jkcarino.adobo.patches.all.screenshot.detection.removeScreenshotDetectionPatch
+import dev.jkcarino.adobo.patches.reddit.misc.firebase.spoofCertificateHashPatch
+import dev.jkcarino.adobo.patches.reddit.shared.COMPATIBILITY_REDDIT
+
+@Suppress("unused")
+val disableScreenshotBannerPatch = patch(
+    name = "Disable screenshot banner",
+    description = "Disables the banner that shows up after taking a screenshot."
+) {
+    compatibleWith(COMPATIBILITY_REDDIT)
+
+    dependsOn(
+        spoofCertificateHashPatch,
+        removeScreenshotDetectionPatch
+    )
+
+    execute {
+        OnScreenCapturedFingerprint.methodOrNull?.returnEarly()
+
+        if (packageMetadata.versionName <= "2026.42.0") {
+            screenshotBannerFingerprints.forEach { fingerprint ->
+                fingerprint.method.apply {
+                    val booleanIndex = fingerprint.instructionMatches.last().index - 1
+                    val booleanRegister =
+                        getInstruction<OneRegisterInstruction>(booleanIndex).registerA
+
+                    replaceInstruction(
+                        index = booleanIndex,
+                        smaliInstruction = """
+                            sget-object v$booleanRegister, Ljava/lang/Boolean;->FALSE:Ljava/lang/Boolean;
+                        """
+                    )
+                }
+            }
+        }
+    }
+}
