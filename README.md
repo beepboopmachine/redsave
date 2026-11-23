@@ -41,7 +41,7 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
 
 ### Using Morphe Manager (Recommended)
 1. Open Morphe Manager on your phone.
-2. Go to **Settings** > **Sources** and add this repository's GitHub URL: `https://github.com/beepboopmachine/red-pat`.
+2. Go to **Settings** > **Sources** and add this repository's GitHub URL: `https://github.com/beepboopmachine/redsave`.
 3. Go back to the dashboard, select **Reddit** (`v2026.47.0`), enable **Download media**, and tap **Patch**.
 4. Install the patched APK.
 
@@ -50,8 +50,8 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
 ### Using Morphe CLI (PC)
 1. Clone the repo and build the patch:
    ```bash
-   git clone https://github.com/beepboopmachine/red-pat.git
-   cd red-pat
+   git clone https://github.com/beepboopmachine/redsave.git
+   cd redsave
    ./gradlew :patches:build
    ```
    *(Requires JDK 17+ and Android SDK 34/35)*
@@ -74,7 +74,7 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
 ## Supported Versions
 
 <!-- PATCHES_START EXPANDED -->
-> **[v1.0.0](https://github.com/beepboopmachine/red-pat/releases/tag/v1.0.0)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**1 patches** across **1 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
+> **[v1.0.0](https://github.com/beepboopmachine/redsave/releases/tag/v1.0.0)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**1 patches** across **1 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
 
 | # | App | Patches | Version | Package |
 |---|---|---|---|---|
