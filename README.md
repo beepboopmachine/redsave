@@ -86,10 +86,12 @@ This patch injects a clean, native download button into Reddit's feed action bar
 ## 🩹 Patches list
 
 <!-- PATCHES_START EXPANDED -->
-> **[v0.0.0](https://github.com/beepboopmachine/red-pat/releases/tag/v0.0.0)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**0 patches** across **0 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
+> **[v1.0.0](https://github.com/beepboopmachine/red-pat/releases/tag/v1.0.0)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**31 patches** across **1 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
 
 | # | App | Patches | Version | Package |
 |---|---|---|---|---|
+| 1 | [**Reddit**](PATCHES.md#reddit-comredditfrontpage) | 30 | `2026.47.0`, `2026.46.0`, `2026.45.0`, `2026.44.0`, `2026.43.0`, `2026.24.0` | [`com.reddit.frontpage`](https://play.google.com/store/apps/details?id=com.reddit.frontpage) |
+| 2 | [**Universal**](PATCHES.md#universal) | 1 | — | — |
 <!-- PATCHES_END -->
 
 ---
