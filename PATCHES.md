@@ -1,12 +1,12 @@
 # Patches
 
-> Generated from `patches-list.json` — **v1.0.0** (`main`) · **1 patches** across **1 apps** · back to [README](README.md)
+> Generated from `patches-list.json` — **v1.0.1** (`main`) · **1 patches** across **1 apps** · back to [README](README.md)
 
 ---
 
 ## Reddit (com.reddit.frontpage)
 
-**Supported versions:** `2026.47.0` 
+**Supported versions:** `2026.47.0`
 
 | Patch | Details |
 |---|---|

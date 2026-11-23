@@ -74,11 +74,11 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
 ## Supported Versions
 
 <!-- PATCHES_START EXPANDED -->
-> **[v1.0.0](https://github.com/beepboopmachine/redsave/releases/tag/v1.0.0)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**1 patches** across **1 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
+> **[v1.0.1](https://github.com/beepboopmachine/redsave/releases/tag/v1.0.1)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**1 patches** across **1 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
 
 | # | App | Patches | Version | Package |
 |---|---|---|---|---|
-| 1 | [**Reddit**](PATCHES.md#reddit-comredditfrontpage) | 1 | 2026.47.0 | [`com.reddit.frontpage`](https://play.google.com/store/apps/details?id=com.reddit.frontpage) |
+| 1 | [**Reddit**](PATCHES.md#reddit-comredditfrontpage) | 1 | `2026.47.0` | [`com.reddit.frontpage`](https://play.google.com/store/apps/details?id=com.reddit.frontpage) |
 <!-- PATCHES_END -->
 
 ---
