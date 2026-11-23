@@ -194,24 +194,6 @@ internal object VideoPlayerToolbarFingerprint : Fingerprint(
 )
 
 /**
- * Fingerprint for storage permission check (lu20.f in 2026.47.0).
- * Matches class lu20 via string "android.permission.READ_MEDIA_VISUAL_USER_SELECTED".
- */
-internal object StoragePermissionCheckClassFingerprint : Fingerprint(
-    returnType = "Z",
-    parameters = listOf("[Ljava/lang/String;", "[I"),
-    filters = listOf(
-        string("android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
-    )
-)
-
-internal object StoragePermissionCheckFingerprint : Fingerprint(
-    classFingerprint = StoragePermissionCheckClassFingerprint,
-    returnType = "Z",
-    parameters = listOf("Lcom/reddit/screen/BaseScreen;", "I")
-)
-
-/**
  * Fingerprint for Home Feed ActionBar Compose dispatcher (m5s0.c in 2026.47.0).
  * Takes (to30, yqj, jyb0, shareM20, repostM20, ...) and invokes h30.a with tag "post_footer".
  */

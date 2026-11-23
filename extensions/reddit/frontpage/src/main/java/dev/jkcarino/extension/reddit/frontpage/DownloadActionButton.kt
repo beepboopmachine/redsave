@@ -2,27 +2,22 @@ package dev.jkcarino.extension.reddit.frontpage
 
 import android.app.Activity
 import android.app.Application
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.ContextWrapper
-import android.content.res.ColorStateList
 import android.content.res.Configuration
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import android.util.TypedValue
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.Window
-import android.widget.ImageButton
-import android.widget.ImageView
 import java.lang.ref.WeakReference
 import java.lang.reflect.Constructor
 import java.lang.reflect.InvocationHandler
@@ -34,17 +29,19 @@ import java.util.ArrayList
 import java.util.IdentityHashMap
 import java.util.LinkedHashMap
 import java.util.WeakHashMap
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 
 object DownloadActionButton {
 
     private const val TAG = "DownloadActionButton"
-    private const val BUTTON_TAG = "morphe_feed_download_pill"
+    private const val MAX_ELEMENTS_PER_POST = 8
+    private const val CURRENT_POST_MAX_AGE_MS = 5000L
 
     private fun <K, V> createLruMap(maxEntries: Int): MutableMap<K, V> {
         return java.util.Collections.synchronizedMap(
-            object : LinkedHashMap<K, V>(128, 0.75f, true) {
+            object : LinkedHashMap<K, V>(64, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean {
                     return size > maxEntries
                 }
@@ -66,22 +63,36 @@ object DownloadActionButton {
         }
     }
 
-    // Bounded identity LRU with WeakReference values -> zero equals() collisions AND zero WeakHashMap memory leaks
-    private val POST_CACHE: MutableMap<IdentityKey, WeakReference<Any>> = createLruMap(600)
-    private val POST_BY_ID: MutableMap<String, Any> = createLruMap(500)
-    private val FEED_ELEMENTS_BY_ID: MutableMap<String, java.util.concurrent.CopyOnWriteArrayList<Any>> = createLruMap(500)
-    private val FEED_ELEMENT_VERSION: MutableMap<String, AtomicInteger> = createLruMap(500)
-    private val MEDIA_CACHE_BY_ID: MutableMap<String, MediaInfo> = createLruMap(600)
-    private val WRAPPED_WINDOWS: MutableMap<Window, Boolean> = java.util.Collections.synchronizedMap(WeakHashMap())
+    private class CurrentPostEntry(
+        val postRef: WeakReference<Any>,
+        val activityRef: WeakReference<Activity>?,
+        val setAtElapsedMs: Long
+    )
+
+    // Bounded LRU caches (cleared on onTrimMemory).
+    // POST_CACHE holds weak refs to Reddit-owned models; POST_ID_BY_SHARE holds strong String postIds so FeedPostBundle is never lost to GC.
+    private val POST_CACHE: MutableMap<IdentityKey, WeakReference<Any>> = createLruMap(300)
+    private val POST_ID_BY_SHARE: MutableMap<IdentityKey, String> = createLruMap(300)
+    private val POST_BY_ID: MutableMap<String, Any> = createLruMap(150)
+    private val FEED_ELEMENTS_BY_ID: MutableMap<String, java.util.concurrent.CopyOnWriteArrayList<Any>> = createLruMap(150)
+    private val FEED_ELEMENT_VERSION: MutableMap<String, AtomicInteger> = createLruMap(150)
+    private val MEDIA_CACHE_BY_ID: MutableMap<String, MediaInfo> = createLruMap(300)
+    private val WRAPPED_WINDOWS: MutableMap<Window, WeakReference<Window.Callback>> = java.util.Collections.synchronizedMap(WeakHashMap())
+
+    // Cached reflection handles for Link ID methods (avoids repeated getMethod() on every Link constructor)
+    private val KIND_WITH_ID_METHOD_CACHE = ConcurrentHashMap<Class<*>, Method>()
+    private val RAW_ID_METHOD_CACHE = ConcurrentHashMap<Class<*>, Method>()
+    private val MISSING_METHOD_SENTINEL: Method = Any::class.java.getMethod("toString")
 
     // Explicit ReentrantLocks (never Kotlin synchronized{} which can emit R8-stripped kotlin.Unit.INSTANCE)
     private val TOUCH_LOCK = ReentrantLock()
     private val FEED_ELEMENT_LOCK = ReentrantLock()
 
-    @Volatile private var sCurrentPost: WeakReference<Any>? = null
+    @Volatile private var sCurrentPost: CurrentPostEntry? = null
     @Volatile private var sLastTouchDurationMs: Long = 0L
     @Volatile private var sLastTouchUpElapsedMs: Long = 0L
     @Volatile private var sTouchDownTime: Long = 0L
+    @Volatile private var sLongPressTimeoutMs: Long = 400L
     @Volatile private var sLastFbpHandledElapsedMs: Long = 0L
     @Volatile private var sLastFbpHandledKey: String? = null
     @Volatile private var sLifecycleRegistered: Boolean = false
@@ -141,14 +152,40 @@ object DownloadActionButton {
     }
 
     private fun getPostCache(key: Any?): Any? {
-        if (key == null) return null
+        if (key == null || POST_CACHE.isEmpty()) return null
         return POST_CACHE[IdentityKey(key)]?.get()
+    }
+
+    private fun resolveBoundPost(shareM20: Any?): Any? {
+        if (shareM20 == null) return null
+        if (!POST_ID_BY_SHARE.isEmpty()) {
+            val postId = POST_ID_BY_SHARE[IdentityKey(shareM20)]
+            if (postId != null) {
+                return FeedPostBundle(postId, POST_BY_ID[postId])
+            }
+        }
+        return getPostCache(shareM20)
+    }
+
+    private fun getValidCurrentPost(): Any? {
+        val entry = sCurrentPost ?: return null
+        val age = SystemClock.elapsedRealtime() - entry.setAtElapsedMs
+        if (age < 0L || age > CURRENT_POST_MAX_AGE_MS) {
+            sCurrentPost = null
+            return null
+        }
+        val expectedAct = entry.activityRef?.get()
+        val currentAct = getCurrentActivity()
+        if (expectedAct != null && currentAct != null && expectedAct !== currentAct) {
+            return null
+        }
+        return entry.postRef.get()
     }
 
     private fun isHttpUrl(url: String?): Boolean {
         if (isBlank(url)) return false
         val l = lower(url!!)
-        return strStartsWith(l, "http://") || strStartsWith(l, "https://")
+        return strStartsWith(l, "https://")
     }
 
     private fun extractHostLower(url: String): String {
@@ -173,7 +210,11 @@ object DownloadActionButton {
             strEndsWith(pathLower, ".png") ||
             strEndsWith(pathLower, ".gif") ||
             strEndsWith(pathLower, ".webp") ||
-            strEndsWith(pathLower, ".mp4")
+            strEndsWith(pathLower, ".avif") ||
+            strEndsWith(pathLower, ".heic") ||
+            strEndsWith(pathLower, ".bmp") ||
+            strEndsWith(pathLower, ".mp4") ||
+            strEndsWith(pathLower, ".webm")
     }
 
     // Reject bare https://v.redd.it/<id> HTML post-redirect pages
@@ -226,156 +267,56 @@ object DownloadActionButton {
         val upAt = sLastTouchUpElapsedMs
         sLastTouchDurationMs = 0L
         sLastTouchUpElapsedMs = 0L
-        if (dur < 400L || upAt == 0L) return false
+        val threshold = sLongPressTimeoutMs
+        if (dur < threshold || upAt == 0L) return false
         val age = SystemClock.elapsedRealtime() - upAt
         return age in 0L..350L
     }
 
-    // --- Android View Pill Construction ---
-
-    @JvmStatic
-    fun createPillButton(context: Context): ImageButton {
-        val isDark = isNightMode(context)
-        val borderColor = if (isDark) Color.argb(41, 255, 255, 255) else Color.argb(36, 0, 0, 0)
-        val rippleColor = if (isDark) Color.argb(38, 255, 255, 255) else Color.argb(24, 0, 0, 0)
-        val iconTint = if (isDark) Color.parseColor("#F2F4F5") else Color.parseColor("#181C1F")
-
-        val pillOutline = GradientDrawable()
-        pillOutline.shape = GradientDrawable.RECTANGLE
-        pillOutline.cornerRadius = dpF(context, 999f)
-        pillOutline.setColor(Color.TRANSPARENT)
-        pillOutline.setStroke(dp(context, 1), borderColor)
-
-        val rippleMask = GradientDrawable()
-        rippleMask.shape = GradientDrawable.RECTANGLE
-        rippleMask.cornerRadius = dpF(context, 999f)
-        rippleMask.setColor(Color.WHITE)
-
-        val resId = getDownloadIconResId(context)
-
-        val btn = ImageButton(context)
-        btn.tag = BUTTON_TAG
-        btn.contentDescription = "Download media"
-        btn.background = RippleDrawable(ColorStateList.valueOf(rippleColor), pillOutline, rippleMask)
-        btn.scaleType = ImageView.ScaleType.CENTER_INSIDE
-        btn.isHapticFeedbackEnabled = true
-        val padH = dp(context, 12)
-        val padV = dp(context, 6)
-        btn.setPadding(padH, padV, padH, padV)
-        if (resId != 0) {
-            btn.setImageResource(resId)
-            btn.imageTintList = ColorStateList.valueOf(iconTint)
-        }
-        return btn
-    }
-
-    @JvmStatic
-    fun bindPillButton(
-        button: ImageButton,
-        currentUrl: String?,
-        allUrls: List<String>?,
-        postTitle: String?
-    ) {
-        val cleanAll = MediaDownloadHelper.sanitizeUrls(allUrls)
-        val hasCurrent = !isBlank(currentUrl) && isHttpUrl(currentUrl) && !isStreamingManifest(currentUrl!!) && !isBareVRedditUrl(currentUrl)
-        if (cleanAll.isEmpty() && !hasCurrent) {
-            button.visibility = View.GONE
-            button.setOnClickListener(null)
-            button.setOnLongClickListener(null)
-            return
-        }
-
-        button.visibility = View.VISIBLE
-        button.setOnClickListener { v ->
-            MediaDownloadHelper.onTap(v.context, currentUrl, cleanAll, postTitle)
-        }
-        button.setOnLongClickListener { v ->
-            v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            MediaDownloadHelper.onLongPress(v.context, currentUrl, cleanAll, postTitle)
-            true
-        }
-    }
-
-    @JvmStatic
-    fun attachBeforeShare(
-        parent: ViewGroup,
-        shareView: View,
-        currentUrl: String?,
-        allUrls: List<String>?,
-        postTitle: String?
-    ) {
-        val existing = parent.findViewWithTag<ImageButton>(BUTTON_TAG)
-        val button = existing ?: createPillButton(parent.context).also { btn ->
-            val rawIndex = parent.indexOfChild(shareView)
-            val shareIndex = if (rawIndex < 0) 0 else rawIndex
-            val shareLp = shareView.layoutParams
-            val lp = if (shareLp is ViewGroup.MarginLayoutParams) {
-                val copied = try {
-                    shareLp.javaClass.getConstructor(shareLp.javaClass).newInstance(shareLp) as ViewGroup.MarginLayoutParams
-                } catch (_: Throwable) {
-                    try {
-                        shareLp.javaClass.getConstructor(ViewGroup.MarginLayoutParams::class.java).newInstance(shareLp) as ViewGroup.MarginLayoutParams
-                    } catch (_: Throwable) {
-                        ViewGroup.MarginLayoutParams(dp(parent.context, 44), dp(parent.context, 32))
-                    }
-                }
-                copied.width = dp(parent.context, 44)
-                copied.height = dp(parent.context, 32)
-                copied.marginEnd = dp(parent.context, 8)
-                copied
-            } else {
-                ViewGroup.MarginLayoutParams(dp(parent.context, 44), dp(parent.context, 32)).apply {
-                    marginEnd = dp(parent.context, 8)
-                }
-            }
-            parent.addView(btn, shareIndex, lp)
-        }
-        bindPillButton(button, currentUrl, allUrls, postTitle)
-    }
-
     // --- Post Model Tracking & Registration ---
 
-    @JvmStatic
-    fun registerLinkWithId(link: Any?, kindWithId: String?) {
-        if (link == null) return
-        val norm = normalizePostId(kindWithId) ?: return
-        POST_BY_ID[norm] = link
-        MEDIA_CACHE_BY_ID.remove(norm)
+    private fun getCachedNoArgMethod(
+        cache: ConcurrentHashMap<Class<*>, Method>,
+        cls: Class<*>,
+        methodName: String
+    ): Method? {
+        val cached = cache[cls]
+        if (cached != null) {
+            return if (cached === MISSING_METHOD_SENTINEL) null else cached
+        }
+        val resolved = try {
+            cls.getMethod(methodName)
+        } catch (_: Throwable) {
+            MISSING_METHOD_SENTINEL
+        }
+        cache[cls] = resolved
+        return if (resolved === MISSING_METHOD_SENTINEL) null else resolved
     }
 
     @JvmStatic
     fun registerLink(link: Any?) {
         if (link == null) return
         try {
-            val kindWithId = try { link.javaClass.getMethod("getKindWithId").invoke(link) as? String } catch (_: Throwable) { null }
+            val cls = link.javaClass
+            val kindMethod = getCachedNoArgMethod(KIND_WITH_ID_METHOD_CACHE, cls, "getKindWithId")
+            val kindWithId = if (kindMethod != null) {
+                try { kindMethod.invoke(link) as? String } catch (_: Throwable) { null }
+            } else null
             val normKind = normalizePostId(kindWithId)
             if (normKind != null) {
                 POST_BY_ID[normKind] = link
                 MEDIA_CACHE_BY_ID.remove(normKind)
             }
-            val rawId = try { link.javaClass.getMethod("getId").invoke(link) as? String } catch (_: Throwable) { null }
+            val idMethod = getCachedNoArgMethod(RAW_ID_METHOD_CACHE, cls, "getId")
+            val rawId = if (idMethod != null) {
+                try { idMethod.invoke(link) as? String } catch (_: Throwable) { null }
+            } else null
             val normRaw = normalizePostId(rawId)
             if (normRaw != null && normRaw != normKind) {
                 POST_BY_ID[normRaw] = link
                 MEDIA_CACHE_BY_ID.remove(normRaw)
             }
         } catch (_: Throwable) {}
-    }
-
-    @JvmStatic
-    fun registerFeedPost(to30: Any?, link: Any?) {
-        if (link != null) {
-            registerLink(link)
-            // Do NOT overwrite sCurrentPost during offscreen feed model binding
-            if (to30 != null) {
-                putPostCache(to30, link)
-                val postId = normalizePostId(getFieldValue(to30, "e") as? String)
-                if (postId != null) {
-                    POST_BY_ID[postId] = link
-                    MEDIA_CACHE_BY_ID.remove(postId)
-                }
-            }
-        }
     }
 
     @JvmStatic
@@ -395,16 +336,17 @@ object DownloadActionButton {
                 for (existing in list) {
                     if (existing === element) return
                 }
-                if (list.size < 24) {
-                    list.add(element)
-                    var ver = FEED_ELEMENT_VERSION[id]
-                    if (ver == null) {
-                        ver = AtomicInteger(0)
-                        FEED_ELEMENT_VERSION[id] = ver
-                    }
-                    ver.incrementAndGet()
-                    MEDIA_CACHE_BY_ID.remove(id)
+                while (list.size >= MAX_ELEMENTS_PER_POST) {
+                    list.removeAt(0)
                 }
+                list.add(element)
+                var ver = FEED_ELEMENT_VERSION[id]
+                if (ver == null) {
+                    ver = AtomicInteger(0)
+                    FEED_ELEMENT_VERSION[id] = ver
+                }
+                ver.incrementAndGet()
+                MEDIA_CACHE_BY_ID.remove(id)
             } finally {
                 FEED_ELEMENT_LOCK.unlock()
             }
@@ -415,20 +357,16 @@ object DownloadActionButton {
     fun onFeedActionBar(to30: Any?, shareM20: Any?) {
         // Clear PDP sCurrentPost when entering a feed action bar so stale PDP posts never leak into feed items
         sCurrentPost = null
-        if (to30 == null) return
+        if (to30 == null || shareM20 == null) return
         try {
             val postId = normalizePostId(getFieldValue(to30, "e") as? String)
-            var link = getPostCache(to30)
-            if (link == null && postId != null) {
-                link = POST_BY_ID[postId]
-            }
-            val target: Any? = if (postId != null) {
-                FeedPostBundle(postId, link)
+            if (postId != null) {
+                POST_ID_BY_SHARE[IdentityKey(shareM20)] = postId
             } else {
-                link
-            }
-            if (target != null && shareM20 != null) {
-                putPostCache(shareM20, target)
+                val link = getPostCache(to30)
+                if (link != null) {
+                    putPostCache(shareM20, link)
+                }
             }
         } catch (_: Throwable) {}
     }
@@ -454,7 +392,16 @@ object DownloadActionButton {
             return
         }
         val post = getPostCache(qo30)
-        sCurrentPost = if (post != null) WeakReference(post) else null
+        if (post != null) {
+            val act = getCurrentActivity()
+            sCurrentPost = CurrentPostEntry(
+                postRef = WeakReference(post),
+                activityRef = if (act != null) WeakReference(act) else null,
+                setAtElapsedMs = SystemClock.elapsedRealtime()
+            )
+        } else {
+            sCurrentPost = null
+        }
     }
 
     // --- Full Bleed Player (FBP) 3-Dots -> Download Override ---
@@ -488,32 +435,36 @@ object DownloadActionButton {
                 // s8h (overflow menu Download click): handle immediately as a tap,
                 // then return false so Reddit's handler dismisses the overflow sheet cleanly.
                 if (mediaPage != null) {
-                    sLastFbpHandledElapsedMs = nowElapsed
-                    sLastFbpHandledKey = dedupKey
-                    dispatchFbpMediaDownload(mediaPage, isLongPress = false)
+                    if (dispatchFbpMediaDownload(mediaPage)) {
+                        sLastFbpHandledElapsedMs = nowElapsed
+                        sLastFbpHandledKey = dedupKey
+                    }
                 }
                 return false
             }
 
             // t8h (Save event dispatched after overflow sheet closes):
-            // ALWAYS return true so Reddit's broken FbpImageDownloadWorker never runs.
+            // Suppress Reddit's worker ONLY if we already handled this event or successfully scheduled a download now.
             val alreadyHandledSame = dedupKey != null &&
                 dedupKey == sLastFbpHandledKey &&
-                (nowElapsed - sLastFbpHandledElapsedMs) in 0L..1500L
-            if (!alreadyHandledSame && mediaPage != null) {
+                (nowElapsed - sLastFbpHandledElapsedMs) in 0L..3000L
+            if (alreadyHandledSame) {
+                return true
+            }
+            if (mediaPage != null && dispatchFbpMediaDownload(mediaPage)) {
                 sLastFbpHandledElapsedMs = nowElapsed
                 sLastFbpHandledKey = dedupKey
-                dispatchFbpMediaDownload(mediaPage, isLongPress = false)
+                return true
             }
-            return true
+            return false
         } catch (t: Throwable) {
             Log.e(TAG, "onFbpDownloadEvent failed", t)
             return false
         }
     }
 
-    private fun dispatchFbpMediaDownload(mediaPage: Any, isLongPress: Boolean) {
-        try {
+    private fun dispatchFbpMediaDownload(mediaPage: Any): Boolean {
+        return try {
             val allUrls = ArrayList<String>()
             var currentUrl: String? = null
             var postTitle: String? = null
@@ -596,28 +547,26 @@ object DownloadActionButton {
                 }
             }
 
-            if (currentUrl == null && allUrls.isNotEmpty()) {
-                currentUrl = allUrls[0]
+            val sanitized = MediaDownloadHelper.sanitizeUrls(allUrls)
+            if (sanitized.isEmpty()) {
+                return false
             }
 
-            Log.i(TAG, "FBP download postId=$postId urls=${allUrls.size} current=$currentUrl long=$isLongPress")
-
-            val finalCurrent = currentUrl
+            val finalCurrent = if (currentUrl != null && isHttpUrl(currentUrl)) currentUrl else sanitized[0]
             val finalTitle = if (isBlank(postTitle)) "reddit_media" else postTitle
+            Log.i(TAG, "FBP download postId=$postId urls=${sanitized.size} current=$finalCurrent")
+
+            val act = getCurrentActivity() ?: getAppContext() ?: return false
             MAIN_HANDLER.post {
                 try {
-                    val act = getCurrentActivity() ?: getAppContext() ?: return@post
-                    if (isLongPress) {
-                        MediaDownloadHelper.onLongPress(act, finalCurrent, allUrls, finalTitle)
-                    } else {
-                        MediaDownloadHelper.onTap(act, finalCurrent, allUrls, finalTitle)
-                    }
+                    MediaDownloadHelper.onTap(act, finalCurrent, sanitized, finalTitle)
                 } catch (t: Throwable) {
                     Log.e(TAG, "Error dispatching FBP download", t)
                 }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "dispatchFbpMediaDownload failed", t)
+            false
         }
     }
 
@@ -860,6 +809,7 @@ object DownloadActionButton {
         tagInstance: Any? = null,
         isRefresh: Boolean = false,
         modifierInstance: Any? = null,
+        sizeInstance: Any? = null,
         k30Instance: Any? = null
     ) {
         if (composer == null || shareM20 == null) return
@@ -874,9 +824,9 @@ object DownloadActionButton {
                 ensureTouchTracker()
             }
 
-            // Look up bound post for this shareM20; only fall back to sCurrentPost for PDP
-            val boundPost = getPostCache(shareM20)
-            val resolvedPost = boundPost ?: sCurrentPost?.get()
+            // Look up bound post for this shareM20; only fall back to valid PDP sCurrentPost
+            val boundPost = resolveBoundPost(shareM20)
+            val resolvedPost = boundPost ?: getValidCurrentPost()
             if (resolvedPost == null || !hasDownloadableMediaDirect(resolvedPost)) {
                 return
             }
@@ -940,9 +890,8 @@ object DownloadActionButton {
             } else {
                 "obj_${System.identityHashCode(resolvedPost)}"
             }
-            val callbackKey = "${postKey}_${System.identityHashCode(shareM20)}"
-            val callback = createActionCallback(shareM20, resolvedPost, callbackKey, targetClass, m20Ctor)
-                ?: DownloadActionCallback(callbackKey) {
+            val callback = createActionCallback(shareM20, resolvedPost, postKey, targetClass, m20Ctor)
+                ?: DownloadActionCallback(postKey) {
                     handleDownloadClick(shareM20, resolvedPost)
                 }
 
@@ -995,7 +944,8 @@ object DownloadActionButton {
         val m = renderMethod ?: return
         try {
             if (isRefresh) {
-                m.invoke(null, downloadM20, icon, style, tag, null, null, null, composer, 3072, 48)
+                val defaultMask = (if (modifierInstance == null) 16 else 0) or (if (sizeInstance == null) 32 else 0)
+                m.invoke(null, downloadM20, icon, style, tag, modifierInstance, sizeInstance, k30Instance, composer, 3072, defaultMask)
             } else {
                 // Forward modifierInstance and k30Instance so non-null Modifier in h30.b never throws NPE
                 m.invoke(null, downloadM20, icon, style, tag, modifierInstance, k30Instance, composer, 3072)
@@ -1015,15 +965,21 @@ object DownloadActionButton {
         val act = getCurrentActivity() ?: getAppContext() ?: return
         MAIN_HANDLER.post {
             try {
-                val activeTarget = getPostCache(shareM20) ?: target
+                val activeTarget = resolveBoundPost(shareM20) ?: target
                 if (activeTarget == null) return@post
                 val allowFallback = activeTarget !is FeedPostBundle
                 val media = extractMedia(activeTarget, allowCurrentPostFallback = allowFallback)
-                val currentUrl = media.currentUrl ?: if (media.urls.isNotEmpty()) media.urls[0] else null
+                val sanitized = MediaDownloadHelper.sanitizeUrls(media.urls)
+                if (sanitized.isEmpty() && activeTarget is FeedPostBundle) {
+                    // Record negative marker so next recomposition hides the pill for non-downloadable media
+                    val emptyMarker = MediaInfo()
+                    MEDIA_CACHE_BY_ID[activeTarget.postId] = emptyMarker
+                }
+                val currentUrl = media.currentUrl ?: if (sanitized.isNotEmpty()) sanitized[0] else null
                 if (isLongPress) {
-                    MediaDownloadHelper.onLongPress(act, currentUrl, media.urls, media.title)
+                    MediaDownloadHelper.onLongPress(act, currentUrl, sanitized, media.title)
                 } else {
-                    MediaDownloadHelper.onTap(act, currentUrl, media.urls, media.title)
+                    MediaDownloadHelper.onTap(act, currentUrl, sanitized, media.title)
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "Error handling download click", t)
@@ -1119,20 +1075,17 @@ object DownloadActionButton {
         changed1: Int,
         changed2: Int
     ) {
-        renderDownloadPill(appearance, shareM20, composer, kcq, tag, isRefresh = true)
-    }
-
-    @JvmStatic
-    fun renderDownloadButton(
-        p0: Any?,
-        p1: Any?,
-        p2: Any?,
-        p3: Any?,
-        p4: Any?,
-        p5: Any?,
-        p6: Any?
-    ) {
-        renderDownloadPill(p1, p4, p6)
+        renderDownloadPill(
+            appearance,
+            shareM20,
+            composer,
+            kcq,
+            tag,
+            isRefresh = true,
+            modifierInstance = modifier,
+            sizeInstance = size,
+            k30Instance = k30
+        )
     }
 
     @JvmStatic
@@ -1154,7 +1107,6 @@ object DownloadActionButton {
                 (child !is ViewGroup || child.isClickable)
             ) {
                 child.setOnClickListener {
-                    // Direct tap handling without re-checking sLastTouchDurationMs since dedicated long-click is wired
                     onNativeTap(screen)
                 }
                 child.setOnLongClickListener { v ->
@@ -1185,22 +1137,29 @@ object DownloadActionButton {
     }
 
     @JvmStatic
-    fun onNativeDownload(target: Any?) {
+    fun onNativeDownload(target: Any?): Boolean {
         ensureTouchTracker()
         val isLongPress = consumeIsLongPress()
-        MAIN_HANDLER.post {
-            try {
-                val context = resolveActivity(target) ?: getAppContext() ?: return@post
-                val media = extractMedia(target, allowCurrentPostFallback = true)
-                val currentUrl = media.currentUrl ?: if (media.urls.isNotEmpty()) media.urls[0] else null
-                if (isLongPress) {
-                    MediaDownloadHelper.onLongPress(context, currentUrl, media.urls, media.title)
-                } else {
-                    MediaDownloadHelper.onTap(context, currentUrl, media.urls, media.title)
+        return try {
+            val context = resolveActivity(target) ?: getAppContext() ?: return false
+            val media = extractMedia(target, allowCurrentPostFallback = true)
+            val sanitized = MediaDownloadHelper.sanitizeUrls(media.urls)
+            if (sanitized.isEmpty()) return false
+            val currentUrl = if (media.currentUrl != null && isHttpUrl(media.currentUrl)) media.currentUrl else sanitized[0]
+            MAIN_HANDLER.post {
+                try {
+                    if (isLongPress) {
+                        MediaDownloadHelper.onLongPress(context, currentUrl, sanitized, media.title)
+                    } else {
+                        MediaDownloadHelper.onTap(context, currentUrl, sanitized, media.title)
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Error dispatching onNativeDownload", t)
                 }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Error in onNativeDownload", t)
             }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error in onNativeDownload", t)
+            false
         }
     }
 
@@ -1220,37 +1179,44 @@ object DownloadActionButton {
     }
 
     @JvmStatic
-    fun onSaveMedia(screen: Any?, uri: String?, link: Any?) {
+    fun onSaveMedia(screen: Any?, uri: String?, link: Any?): Boolean {
         ensureTouchTracker()
         val isLongPress = consumeIsLongPress()
-        MAIN_HANDLER.post {
-            try {
-                val context = resolveActivity(screen) ?: getAppContext() ?: return@post
-                val cleanUri = if (!isBlank(uri)) unescapeAmp(uri!!) else null
-                val linkMedia = if (link != null) extractMedia(link, allowCurrentPostFallback = false) else MediaInfo()
-                val media = if (linkMedia.urls.isEmpty() && screen != null) {
-                    val screenMedia = extractMedia(screen, allowCurrentPostFallback = cleanUri == null)
-                    if ((isBlank(screenMedia.title) || screenMedia.title == "reddit_media") &&
-                        !isBlank(linkMedia.title) && linkMedia.title != "reddit_media"
-                    ) {
-                        screenMedia.title = linkMedia.title
-                    }
-                    screenMedia
-                } else {
-                    linkMedia
+        return try {
+            val context = resolveActivity(screen) ?: getAppContext() ?: return false
+            val cleanUri = if (!isBlank(uri)) unescapeAmp(uri!!) else null
+            val linkMedia = if (link != null) extractMedia(link, allowCurrentPostFallback = false) else MediaInfo()
+            val media = if (linkMedia.urls.isEmpty() && screen != null) {
+                val screenMedia = extractMedia(screen, allowCurrentPostFallback = cleanUri == null)
+                if ((isBlank(screenMedia.title) || screenMedia.title == "reddit_media") &&
+                    !isBlank(linkMedia.title) && linkMedia.title != "reddit_media"
+                ) {
+                    screenMedia.title = linkMedia.title
                 }
-                if (cleanUri != null && !containsSameMedia(media.urls, cleanUri)) {
-                    media.urls.add(0, cleanUri)
-                }
-                val currentUrl = cleanUri ?: media.currentUrl ?: if (media.urls.isNotEmpty()) media.urls[0] else null
-                if (isLongPress) {
-                    MediaDownloadHelper.onLongPress(context, currentUrl, media.urls, media.title)
-                } else {
-                    MediaDownloadHelper.onTap(context, currentUrl, media.urls, media.title)
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Error in onSaveMedia", t)
+                screenMedia
+            } else {
+                linkMedia
             }
+            if (cleanUri != null && !containsSameMedia(media.urls, cleanUri)) {
+                media.urls.add(0, cleanUri)
+            }
+            val sanitized = MediaDownloadHelper.sanitizeUrls(media.urls)
+            if (sanitized.isEmpty()) return false
+            val currentUrl = if (cleanUri != null && isHttpUrl(cleanUri)) cleanUri else (media.currentUrl ?: sanitized[0])
+            MAIN_HANDLER.post {
+                try {
+                    if (isLongPress) {
+                        MediaDownloadHelper.onLongPress(context, currentUrl, sanitized, media.title)
+                    } else {
+                        MediaDownloadHelper.onTap(context, currentUrl, sanitized, media.title)
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Error dispatching onSaveMedia", t)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Error in onSaveMedia", t)
+            false
         }
     }
 
@@ -1263,6 +1229,7 @@ object DownloadActionButton {
         var isVideo = false
         var isGallery = false
         var isSingleVideoModel = false
+        var incomplete = false
 
         fun copy(): MediaInfo {
             val c = MediaInfo()
@@ -1272,6 +1239,7 @@ object DownloadActionButton {
             c.isVideo = isVideo
             c.isGallery = isGallery
             c.isSingleVideoModel = isSingleVideoModel
+            c.incomplete = incomplete
             return c
         }
     }
@@ -1286,12 +1254,10 @@ object DownloadActionButton {
 
     private fun containsSameMedia(urls: List<String>, candidate: String): Boolean {
         if (urls.contains(candidate)) return true
-        val normCand = MediaDownloadHelper.normalizeUrl(candidate)
-        val candSeg = extractLastSegmentLower(normCand)
+        val candKey = ExtensionStrUtils.canonicalMediaKey(candidate)
+        if (candKey.isEmpty()) return false
         for (u in urls) {
-            val normU = MediaDownloadHelper.normalizeUrl(u)
-            if (normU == normCand) return true
-            if (candSeg.length >= 6 && extractLastSegmentLower(normU) == candSeg) return true
+            if (ExtensionStrUtils.canonicalMediaKey(u) == candKey) return true
         }
         return false
     }
@@ -1345,13 +1311,13 @@ object DownloadActionButton {
         normalizeVideoMediaInfo(info)
 
         val verAfter = FEED_ELEMENT_VERSION[bundle.postId]?.get() ?: 0
-        if (verBefore == verAfter && (info.urls.isNotEmpty() || liveLink != null)) {
+        if (verBefore == verAfter && !info.incomplete && (info.urls.isNotEmpty() || liveLink != null)) {
             MEDIA_CACHE_BY_ID[bundle.postId] = info.copy()
         }
         return info
     }
 
-    // Keeps only the highest-width (or unsized source) preview.redd.it URL per unique path
+    // Keeps only the highest-width (or unsized source) preview.redd.it URL per unique case-sensitive path
     private fun deduplicatePreviewResolutions(info: MediaInfo) {
         if (info.urls.size <= 1) return
         val bestByPath = LinkedHashMap<String, String>()
@@ -1360,7 +1326,7 @@ object DownloadActionButton {
 
         for (u in info.urls) {
             if (extractHostLower(u) == "preview.redd.it") {
-                val path = extractPathLower(u)
+                val path = try { Uri.parse(u).path ?: "" } catch (_: Throwable) { "" }
                 val w = try {
                     val qp = Uri.parse(u).getQueryParameter("width")
                     if (isBlank(qp)) Int.MAX_VALUE else parsePositiveInt(qp)
@@ -1397,7 +1363,8 @@ object DownloadActionButton {
         val cur = info.currentUrl
         if (cur != null && !info.urls.contains(cur)) {
             if (extractHostLower(cur) == "preview.redd.it") {
-                val upgraded = bestByPath[extractPathLower(cur)]
+                val curPath = try { Uri.parse(cur).path ?: "" } catch (_: Throwable) { "" }
+                val upgraded = bestByPath[curPath]
                 info.currentUrl = upgraded ?: if (info.urls.isNotEmpty()) info.urls[0] else null
             } else {
                 info.currentUrl = if (info.urls.isNotEmpty()) info.urls[0] else null
@@ -1654,7 +1621,7 @@ object DownloadActionButton {
             deduplicatePreviewResolutions(info)
             normalizeVideoMediaInfo(info)
 
-            val curPost = sCurrentPost?.get()
+            val curPost = getValidCurrentPost()
             if (allowCurrentPostFallback && info.urls.isEmpty() && curPost != null && curPost !== target && !visited.containsKey(curPost)) {
                 val fallback = extractMedia(curPost, allowCurrentPostFallback = false, visited = visited)
                 if (fallback.urls.isNotEmpty()) {
@@ -2086,7 +2053,11 @@ object DownloadActionButton {
         visited: IdentityHashMap<Any, Boolean>,
         depth: Int
     ) {
-        if (obj == null || depth > 4 || visited.size >= 80) return
+        if (obj == null) return
+        if (depth > 4 || visited.size >= 80) {
+            info.incomplete = true
+            return
+        }
         if (obj is String) {
             if (isPostMediaUrl(obj)) {
                 val clean = unescapeAmp(obj)
@@ -2146,7 +2117,10 @@ object DownloadActionButton {
         if (obj is Iterable<*>) {
             var count = 0
             for (item in obj) {
-                if (count++ >= 20) break
+                if (count++ >= 20) {
+                    info.incomplete = true
+                    break
+                }
                 scanFeedElementForMedia(item, info, visited, depth + 1)
             }
             return
@@ -2154,12 +2128,18 @@ object DownloadActionButton {
         if (obj is Map<*, *>) {
             var count = 0
             for (v in obj.values) {
-                if (count++ >= 20) break
+                if (count++ >= 20) {
+                    info.incomplete = true
+                    break
+                }
                 scanFeedElementForMedia(v, info, visited, depth + 1)
             }
             return
         }
         if (obj is Array<*>) {
+            if (obj.size > 20) {
+                info.incomplete = true
+            }
             val max = if (obj.size < 20) obj.size else 20
             for (i in 0 until max) {
                 scanFeedElementForMedia(obj[i], info, visited, depth + 1)
@@ -2233,7 +2213,18 @@ object DownloadActionButton {
             }
         }
         sDownloadIconResId = 0
+        Log.w(TAG, "No download icon drawable resolved; download pill will remain hidden")
         return 0
+    }
+
+    private fun clearTransientCaches() {
+        POST_CACHE.clear()
+        POST_ID_BY_SHARE.clear()
+        POST_BY_ID.clear()
+        FEED_ELEMENTS_BY_ID.clear()
+        FEED_ELEMENT_VERSION.clear()
+        MEDIA_CACHE_BY_ID.clear()
+        sCurrentPost = null
     }
 
     private fun ensureTouchTracker() {
@@ -2243,6 +2234,10 @@ object DownloadActionButton {
             if (sLifecycleRegistered) return
             val context = getAppContext()
             if (context is Application) {
+                try {
+                    val timeout = ViewConfiguration.getLongPressTimeout().toLong()
+                    if (timeout >= 200L) sLongPressTimeoutMs = timeout
+                } catch (_: Throwable) {}
                 context.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
                     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                         attachTouchTracker(activity)
@@ -2252,12 +2247,33 @@ object DownloadActionButton {
                         sResumedActivity = WeakReference(activity)
                         attachTouchTracker(activity)
                     }
-                    override fun onActivityPaused(activity: Activity) {}
+                    override fun onActivityPaused(activity: Activity) {
+                        if (sResumedActivity?.get() === activity) {
+                            sResumedActivity = null
+                        }
+                        if (sCurrentPost?.activityRef?.get() === activity) {
+                            sCurrentPost = null
+                        }
+                    }
                     override fun onActivityStopped(activity: Activity) {}
                     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
                     override fun onActivityDestroyed(activity: Activity) {
                         if (sResumedActivity?.get() === activity) {
                             sResumedActivity = null
+                        }
+                        if (sCurrentPost?.activityRef?.get() === activity) {
+                            sCurrentPost = null
+                        }
+                    }
+                })
+                context.registerComponentCallbacks(object : ComponentCallbacks2 {
+                    override fun onConfigurationChanged(newConfig: Configuration) {}
+                    override fun onLowMemory() {
+                        clearTransientCaches()
+                    }
+                    override fun onTrimMemory(level: Int) {
+                        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+                            clearTransientCaches()
                         }
                     }
                 })
@@ -2319,13 +2335,18 @@ object DownloadActionButton {
     private fun attachTouchTracker(activity: Activity?) {
         try {
             if (activity == null || activity.window == null) return
+            try {
+                val timeout = ViewConfiguration.getLongPressTimeout().toLong()
+                if (timeout >= 200L) sLongPressTimeoutMs = timeout
+            } catch (_: Throwable) {}
             val window = activity.window
-            if (WRAPPED_WINDOWS[window] == true) return
-            val original = window.callback ?: return
-            if (Proxy.isProxyClass(original.javaClass)) {
-                val h = try { Proxy.getInvocationHandler(original) } catch (_: Throwable) { null }
+            val currentCallback = window.callback ?: return
+            val existingProxy = WRAPPED_WINDOWS[window]?.get()
+            if (existingProxy != null && currentCallback === existingProxy) return
+            if (Proxy.isProxyClass(currentCallback.javaClass)) {
+                val h = try { Proxy.getInvocationHandler(currentCallback) } catch (_: Throwable) { null }
                 if (h is TouchTrackerHandler) {
-                    WRAPPED_WINDOWS[window] = true
+                    WRAPPED_WINDOWS[window] = WeakReference(currentCallback)
                     return
                 }
             }
@@ -2333,10 +2354,10 @@ object DownloadActionButton {
             val proxy = Proxy.newProxyInstance(
                 Window.Callback::class.java.classLoader,
                 arrayOf(Window.Callback::class.java),
-                TouchTrackerHandler(original)
+                TouchTrackerHandler(currentCallback)
             ) as Window.Callback
             window.callback = proxy
-            WRAPPED_WINDOWS[window] = true
+            WRAPPED_WINDOWS[window] = WeakReference(proxy)
         } catch (_: Throwable) {}
     }
 
@@ -2384,26 +2405,5 @@ object DownloadActionButton {
         } catch (_: Throwable) {
             null
         }
-    }
-
-    private fun isNightMode(context: Context): Boolean {
-        val mask = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-        return mask == Configuration.UI_MODE_NIGHT_YES
-    }
-
-    private fun dp(context: Context, value: Int): Int {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            value.toFloat(),
-            context.resources.displayMetrics
-        ).toInt()
-    }
-
-    private fun dpF(context: Context, value: Float): Float {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            value,
-            context.resources.displayMetrics
-        )
     }
 }

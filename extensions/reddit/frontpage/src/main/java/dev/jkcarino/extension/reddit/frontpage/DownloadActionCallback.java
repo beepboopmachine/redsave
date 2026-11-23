@@ -25,19 +25,31 @@ public class DownloadActionCallback implements Function0<Object> {
         if (!sUnitResolved) {
             try {
                 Class<?> unitCls = Class.forName("kotlin.Unit");
-                for (Field f : unitCls.getDeclaredFields()) {
-                    if (Modifier.isStatic(f.getModifiers()) && f.getType() == unitCls) {
-                        f.setAccessible(true);
-                        Object val = f.get(null);
-                        if (val != null) {
-                            sUnitInstance = val;
-                            break;
+                Object val = null;
+                try {
+                    Field instField = unitCls.getField("INSTANCE");
+                    if (Modifier.isStatic(instField.getModifiers()) && instField.getType() == unitCls) {
+                        val = instField.get(null);
+                    }
+                } catch (Throwable ignored) {
+                }
+                if (val == null) {
+                    for (Field f : unitCls.getDeclaredFields()) {
+                        if (Modifier.isStatic(f.getModifiers()) && f.getType() == unitCls) {
+                            f.setAccessible(true);
+                            val = f.get(null);
+                            if (val != null) {
+                                break;
+                            }
                         }
                     }
                 }
+                if (val != null) {
+                    sUnitInstance = val;
+                    sUnitResolved = true;
+                }
             } catch (Throwable ignored) {
             }
-            sUnitResolved = true;
         }
         return sUnitInstance;
     }

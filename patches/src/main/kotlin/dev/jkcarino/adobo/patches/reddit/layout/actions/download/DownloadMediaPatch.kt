@@ -84,6 +84,8 @@ private fun matchesActionBarRenderCall(
     return true
 }
 
+private const val ACTION_BAR_SCAN_WINDOW = 120
+
 private fun MutableMethod.hookActionBarRow(
     groupKey: Int,
     actionBarClassType: String,
@@ -101,7 +103,9 @@ private fun MutableMethod.hookActionBarRow(
     }
 
     val expectedRegCount = expectedObjectArgs + expectedIntArgs
-    val scanEnd = minOf(shareGroupIndex + 120, instructions.size)
+    val scanEnd = minOf(shareGroupIndex + ACTION_BAR_SCAN_WINDOW, instructions.size)
+    // Pick the first verified ActionBar render call immediately following the Share Compose group key.
+    // Subsequent buttons in the same row (e.g. Awards/Overflow) may also appear within the window.
     val callIndex = (shareGroupIndex until scanEnd).firstOrNull { idx ->
         val inst = instructions[idx]
         if (inst.opcode != Opcode.INVOKE_STATIC_RANGE) return@firstOrNull false
@@ -110,7 +114,7 @@ private fun MutableMethod.hookActionBarRow(
         val ref = (inst as? ReferenceInstruction)?.reference as? MethodReference
         matchesActionBarRenderCall(ref, actionBarClassType, expectedObjectArgs, expectedIntArgs)
     } ?: throw IllegalStateException(
-        "Could not find verified $expectedRegCount-register ActionBar render call after group $groupKey in $definingClass->$name"
+        "Could not find verified $expectedRegCount-register ActionBar render call within $ACTION_BAR_SCAN_WINDOW instructions after group $groupKey in $definingClass->$name"
     )
 
     val call = instructions[callIndex] as RegisterRangeInstruction
@@ -214,38 +218,68 @@ val downloadMediaPatch = patch(
             extensionSignature = "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;II)V"
         )
 
-        // 6. Hook B: Override Native Lightbox Download Action (LightboxScreen.M5)
+        // 6. Hook B: Override Native Lightbox Download Action (LightboxScreen.M5) with fallback
         LightboxDownloadFingerprint.method.apply {
+            val locals = localRegisterCount()
+            require(locals >= 1) { "LightboxDownloadFingerprint method has .locals $locals; need >= 1" }
             addInstructions(
                 index = 0,
                 smaliInstructions = """
-                    invoke-static/range {p0 .. p0}, $EXTENSION_CLASS_DESCRIPTOR->onNativeDownload(Ljava/lang/Object;)V
+                    invoke-static/range {p0 .. p0}, $EXTENSION_CLASS_DESCRIPTOR->onNativeDownload(Ljava/lang/Object;)Z
+                    move-result v0
+                    if-eqz v0, :morphe_lightbox_continue
                     return-void
+                    :morphe_lightbox_continue
+                    nop
                 """
             )
         }
 
-        // 7. Hook B: Override Native Video/GIF Download Action (VideoPlayerScreen.N5)
+        // 7. Hook B: Override Native Video/GIF Download Action (VideoPlayerScreen.N5) with fallback
         VideoPlayerDownloadFingerprint.method.apply {
+            val locals = localRegisterCount()
+            require(locals >= 1) { "VideoPlayerDownloadFingerprint method has .locals $locals; need >= 1" }
             addInstructions(
                 index = 0,
                 smaliInstructions = """
-                    invoke-static/range {p0 .. p0}, $EXTENSION_CLASS_DESCRIPTOR->onNativeDownload(Ljava/lang/Object;)V
+                    invoke-static/range {p0 .. p0}, $EXTENSION_CLASS_DESCRIPTOR->onNativeDownload(Ljava/lang/Object;)Z
+                    move-result v0
+                    if-eqz v0, :morphe_video_continue
                     return-void
+                    :morphe_video_continue
+                    nop
                 """
             )
         }
 
-        // 8. Hook B: Override Native SaveMediaScreen download execution (SaveMediaScreen.o5)
+        // 8. Hook B: Override Native SaveMediaScreen download execution (SaveMediaScreen.o5) with fallback
         SaveMediaDownloadFingerprint.method.apply {
-            addInstructions(
-                index = 0,
-                smaliInstructions = """
+            val locals = localRegisterCount()
+            val linkSlot = paramRegisterSlot(2) // instance method: p0=this, p1=uri(String), p2=Z, p3=Link
+            val linkAbs = locals + linkSlot
+            val invokeBlock = if (linkAbs < 16) {
+                require(locals >= 1) { "SaveMediaDownloadFingerprint method has .locals $locals; need >= 1" }
+                """
+                    invoke-static {p0, p1, p$linkSlot}, $EXTENSION_CLASS_DESCRIPTOR->onSaveMedia(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z
+                """
+            } else {
+                require(locals >= 3) { "SaveMediaDownloadFingerprint method has .locals $locals; need >= 3 for high param slot $linkAbs" }
+                """
                     move-object/from16 v0, p0
                     move-object/from16 v1, p1
-                    move-object/from16 v2, p3
-                    invoke-static/range {v0 .. v2}, $EXTENSION_CLASS_DESCRIPTOR->onSaveMedia(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)V
+                    move-object/from16 v2, p$linkSlot
+                    invoke-static/range {v0 .. v2}, $EXTENSION_CLASS_DESCRIPTOR->onSaveMedia(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z
+                """
+            }
+            addInstructions(
+                index = 0,
+                smaliInstructions = """
+                    $invokeBlock
+                    move-result v0
+                    if-eqz v0, :morphe_savemedia_continue
                     return-void
+                    :morphe_savemedia_continue
+                    nop
                 """
             )
         }
@@ -280,18 +314,7 @@ val downloadMediaPatch = patch(
             }
         }
 
-        // 11. Hook D: Storage Permission Check Override (lu20.f)
-        StoragePermissionCheckFingerprint.method.apply {
-            addInstructions(
-                index = 0,
-                smaliInstructions = """
-                    const/4 v0, 0x1
-                    return v0
-                """
-            )
-        }
-
-        // 12. Home Feed ActionBar Dispatcher: Hook m5s0.c to bind shareM20 (param 3) -> Link via to30 (param 0)
+        // 11. Home Feed ActionBar Dispatcher: Hook m5s0.c to bind shareM20 (param 3) -> Link via to30 (param 0)
         // Computes exact Dalvik parameter slot dynamically (accounts for wide J/D params).
         FeedActionBarDispatchFingerprint.method.apply {
             val locals = localRegisterCount()

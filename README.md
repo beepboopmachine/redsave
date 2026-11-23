@@ -15,7 +15,7 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
   - **Reddit Videos (v.redd.it)**: Downloads the high-resolution video stream.
   - **RedGifs**: Automatically grabs the direct MP4 file.
 - **Tap or Long-Press**:
-  - **Single tap**: Downloads the media immediately.
+  - **Single tap**: Downloads single-item posts immediately. For multi-item posts, opens the options menu by default until you check **"Remember my choice"**.
   - **Long press**: Opens a menu showing how many items are in the post, letting you pick "Download single" or "Download all", plus a checkbox to remember your choice.
 - **Fixes the built-in download button**: Replaces Reddit's broken 3-dot menu download option with this one so it actually works.
 - **Saves to your regular folders**:
@@ -30,7 +30,7 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
 | :--- | :--- |
 | **App** | Reddit (`com.reddit.frontpage`) |
 | **Version** | `v2026.47.0` |
-| **Android** | Android 12L or newer |
+| **Android** | Android 10 (API 29) or newer |
 
 > [!NOTE]
 > When patching Reddit v2026.47.0, use a full APKM bundle (or a merged APK). Using a standalone base APK without the extra resource splits will cause the app to crash when opening profiles or the share menu.
@@ -52,14 +52,14 @@ It adds a native download button right into the Reddit feed and fixes Reddit's b
    ```bash
    git clone https://github.com/beepboopmachine/redsave.git
    cd redsave
-   ./gradlew :patches:build
+   ./gradlew :patches:buildAndroid
    ```
-   *(Requires JDK 17+ and Android SDK 34/35)*
+   *(Requires JDK 17+, Android SDK 34/35, and GitHub Packages credentials via `gpr.user`/`gpr.key` or `GITHUB_ACTOR`/`GITHUB_TOKEN`)*
 
 2. Patch your Reddit APKM file:
    ```bash
    java -jar morphe-cli.jar patch \
-     --patch-bundle patches/build/libs/patches-1.0.0.mpp \
+     --patches patches/build/libs/patches-1.0.0.mpp \
      --out reddit-patched.apk \
      reddit.apkm
    ```

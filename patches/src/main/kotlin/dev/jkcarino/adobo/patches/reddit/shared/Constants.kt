@@ -16,26 +16,6 @@ val COMPATIBILITY_REDDIT =
             AppTarget(
                 version = "2026.47.0",
                 minSdk = 29
-            ),
-            AppTarget(
-                version = "2026.46.0",
-                minSdk = 29
-            ),
-            AppTarget(
-                version = "2026.45.0",
-                minSdk = 29
-            ),
-            AppTarget(
-                version = "2026.44.0",
-                minSdk = 29
-            ),
-            AppTarget(
-                version = "2026.43.0",
-                minSdk = 29
-            ),
-            AppTarget(
-                version = "2026.24.0",
-                minSdk = 29
             )
         )
     )

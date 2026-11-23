@@ -14,25 +14,52 @@ import java.net.URLClassLoader
 import java.util.jar.Manifest
 
 fun main() {
-    val patchFiles = setOf(
-        File("build/libs/").listFiles { file ->
-            val fileName = file.name
-            !fileName.contains("javadoc") &&
-                    !fileName.contains("sources") &&
-                    fileName.endsWith(".mpp")
-        }!!.first()
-    )
+    val libsDir = File("build/libs/")
+    val candidates = libsDir.listFiles { file ->
+        val fileName = file.name
+        !fileName.contains("javadoc") &&
+            !fileName.contains("sources") &&
+            fileName.endsWith(".mpp")
+    }?.sortedBy { it.name } ?: emptyList()
+
+    require(candidates.isNotEmpty()) {
+        "No .mpp patch bundle found in ${libsDir.absolutePath}. Run :patches:buildAndroid first."
+    }
+
+    val expectedVersion = File("../gradle.properties")
+        .takeIf { it.exists() }
+        ?.readLines()
+        ?.firstOrNull { it.trim().startsWith("version=") }
+        ?.substringAfter("version=")
+        ?.trim()
+
+    val selectedBundle = if (candidates.size == 1) {
+        candidates.first()
+    } else if (!expectedVersion.isNullOrEmpty()) {
+        candidates.firstOrNull { it.name.contains("-$expectedVersion.mpp") }
+            ?: throw IllegalStateException(
+                "Multiple .mpp bundles found in ${libsDir.absolutePath} (${candidates.map { it.name }}), " +
+                    "and none matched version=$expectedVersion"
+            )
+    } else {
+        throw IllegalStateException(
+            "Expected exactly 1 .mpp bundle in ${libsDir.absolutePath}, found ${candidates.map { it.name }}"
+        )
+    }
+
+    val patchFiles = setOf(selectedBundle)
     val loadedPatches = loadPatchesFromJar(patchFiles)
     val patchClassLoader = URLClassLoader(patchFiles.map { it.toURI().toURL() }.toTypedArray())
     val manifest = patchClassLoader.getResources("META-INF/MANIFEST.MF")
 
     while (manifest.hasMoreElements()) {
-        Manifest(manifest.nextElement().openStream())
+        val version = Manifest(manifest.nextElement().openStream())
             .mainAttributes
             .getValue("Version")
-            ?.let {
-                generatePatchList(it, loadedPatches)
-            }
+        if (!version.isNullOrBlank()) {
+            generatePatchList(version, loadedPatches)
+            break
+        }
     }
 }
 

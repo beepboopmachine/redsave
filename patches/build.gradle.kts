@@ -16,10 +16,10 @@ patches {
     about {
         name = "Reddit Download Media Patch"
         description = "Adds a clean native download action pill to Reddit feed cards and intercepts media downloads for high-resolution images, galleries, GIFs, and videos."
-        source = "https://github.com/User/red-pat"
-        author = "dev"
-        contact = "na"
-        website = "na"
+        source = "https://github.com/beepboopmachine/redsave.git"
+        author = "beepboopmachine"
+        contact = "https://github.com/beepboopmachine/redsave/issues"
+        website = "https://github.com/beepboopmachine/redsave"
         license = "GPLv3"
     }
 }
