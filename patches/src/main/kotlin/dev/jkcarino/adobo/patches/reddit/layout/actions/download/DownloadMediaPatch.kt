@@ -15,7 +15,6 @@ import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstructio
 import com.android.tools.smali.dexlib2.iface.instruction.WideLiteralInstruction
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
-import dev.jkcarino.adobo.patches.reddit.misc.firebase.spoofCertificateHashPatch
 import dev.jkcarino.adobo.patches.reddit.shared.COMPATIBILITY_REDDIT
 
 private fun MutableMethod.parameterRegisterCount(): Int {
@@ -138,8 +137,6 @@ val downloadMediaPatch = patch(
     compatibleWith(COMPATIBILITY_REDDIT)
 
     extendWith("extensions/reddit/frontpage.mpe")
-
-    dependsOn(spoofCertificateHashPatch)
 
     execute {
         val actionBarClassType = ActionBarClassFingerprint.classDef.type
