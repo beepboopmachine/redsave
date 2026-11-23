@@ -6,7 +6,7 @@
 
 ## Reddit (com.reddit.frontpage)
 
-**Supported versions:** `2026.47.0` `2026.46.0` `2026.45.0` `2026.44.0` `2026.43.0` `2026.24.0`
+**Supported versions:** `2026.47.0` 
 
 | Patch | Details |
 |---|---|
