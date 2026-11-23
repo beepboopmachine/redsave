@@ -83,6 +83,17 @@ This patch injects a clean, native download button into Reddit's feed action bar
 
 ---
 
+## 🩹 Patches list
+
+<!-- PATCHES_START EXPANDED -->
+> **[v0.0.0](https://github.com/beepboopmachine/red-pat/releases/tag/v0.0.0)**&nbsp;&nbsp;&middot;&nbsp;&nbsp;`main`&nbsp;&nbsp;&middot;&nbsp;&nbsp;**0 patches** across **0 apps**&nbsp;&nbsp;&middot;&nbsp;&nbsp;[Full details](PATCHES.md)
+
+| # | App | Patches | Version | Package |
+|---|---|---|---|---|
+<!-- PATCHES_END -->
+
+---
+
 ## 🏗️ Architecture & How It Works
 
 ```
